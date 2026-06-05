@@ -1,0 +1,3 @@
+# No external dependencies required.
+# rank.py uses only Python standard library (json, csv, datetime, pathlib, argparse).
+# Gzipped JSONL is handled via the stdlib gzip module.

@@ -1,0 +1,107 @@
+# Redrob Hackathon — Submission Metadata
+# Team: Rajneel Chavan (solo)
+
+team_name: "rajneel-chavan"
+
+primary_contact:
+  name: "Rajneel Chavan"
+  email: "rajneelchavan16@gmail.com"
+  phone: "+91-7506448345"
+
+team_members:
+  - name: "Rajneel Chavan"
+    email: "rajneelchavan16@gmail.com"
+    role: "Solo participant — full-stack ML Engineering"
+
+# ============================================================================
+# Code and reproducibility
+# ============================================================================
+github_repo: "https://github.com/rajneelchavan/redrob-candidate-ranker"
+
+sandbox_link: "https://rajneelchavan-redrob-ranker.streamlit.app"
+# Streamlit Cloud deployment — accepts up to 100 candidate JSONL lines,
+# runs rank.py scoring end-to-end, returns ranked CSV.
+
+reproduce_command: "python solution/rank.py --candidates ./candidates.jsonl --out ./rajneel_chavan.csv"
+
+# ============================================================================
+# Compute environment
+# ============================================================================
+compute:
+  platform: "MacBook Pro M2"
+  cpu_cores: 8
+  ram_gb: 16
+  python_version: "3.11"
+  os: "macOS 14"
+  uses_gpu_for_inference: false
+  has_network_during_ranking: false
+  pre_computation_required: false
+  pre_computation_time_minutes: 0
+
+# Runtime: ~33 seconds on Apple M2 (CPU-only, 16GB RAM)
+# No model loading, no pre-computation, no external dependencies.
+# Uses Python stdlib only (json, csv, datetime, pathlib, argparse).
+
+# ============================================================================
+# AI tools declaration
+# ============================================================================
+ai_tools_used:
+  - "Claude"          # Architecture discussion, code review, deck writing
+  - "GitHub Copilot"  # Autocomplete
+
+ai_usage_summary: |
+  Used Claude (Anthropic) for architecture discussion and reviewing scoring
+  formula design choices. Used GitHub Copilot for code autocomplete.
+  All scoring logic, weights, and honeypot detection rules were designed
+  by the author based on reading the JD and data analysis.
+  No candidate data was fed to any LLM during development or ranking.
+  The ranking step itself makes zero external API calls.
+
+# ============================================================================
+# Approach summary
+# ============================================================================
+methodology_summary: |
+  Multi-component feature scoring with multiplicative behavioral modifier.
+  No model loading — pure Python stdlib, zero external dependencies.
+
+  Six scoring components (weights in parentheses):
+    title_score (0.22)      — tiered title mapping derived from the full
+                              dataset title list; Tier-1 targets are Search
+                              Engineer, Recommendation Systems Engineer,
+                              Applied ML Engineer, NLP Engineer, AI/ML Engineer.
+    ai_exp_score (0.25)     — years of AI/ML-specific experience estimated from
+                              career history titles + description content, not
+                              just total YoE.
+    skills_quality (0.20)   — relevant skills × proficiency level × endorsement
+                              trust factor × usage duration; rewards depth over
+                              keyword-stuffing breadth.
+    career_content (0.22)   — term-weighted scan of career descriptions for
+                              production deployment, retrieval, ranking, NDCG/MRR,
+                              and vector-DB evidence. Consulting-company roles
+                              receive a 0.65× recency penalty.
+    trajectory (0.08)       — penalizes all-consulting backgrounds (JD explicitly
+                              disqualifies); rewards product-company AI progression.
+    location (0.03)         — India-based candidates get 0.95–1.00; willing-to-
+                              relocate international candidates get 0.70.
+
+  Behavioral modifier (multiplicative, range 0.25–1.30) combines:
+  open_to_work flag, days since last active, recruiter response rate,
+  notice period, interview completion rate, GitHub activity score,
+  and saved-by-recruiters count.
+
+  Honeypot detection fires on: timeline impossibility (total career months
+  > 2.2× claimed YoE), expert skills with 0 months usage, 8+ expert skills,
+  endorsements > 5× connections, multiple simultaneous current roles.
+
+  Runtime: 33 seconds on Apple M2 CPU for 100K candidates.
+  Top 100 = 100% Tier-1/2 AI titles; 87% India-based; 0 honeypots.
+
+# ============================================================================
+# Declarations
+# ============================================================================
+declarations:
+  read_submission_spec: true
+  code_is_original_work: true
+  no_collusion: true
+  honeypot_check_done: true
+  reproduction_tested: true
