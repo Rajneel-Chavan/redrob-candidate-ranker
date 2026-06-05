@@ -1,3 +1,4 @@
-# No external dependencies required.
-# rank.py uses only Python standard library (json, csv, datetime, pathlib, argparse).
-# Gzipped JSONL is handled via the stdlib gzip module.
+# Optional: install these for semantic similarity reranking (+10% weight component).
+# If not installed, rank.py falls back to base feature scoring automatically.
+sentence-transformers>=2.2.0
+numpy>=1.24.0

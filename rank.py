@@ -21,7 +21,37 @@ import re
 import argparse
 from datetime import date
 from pathlib import Path
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
+
+# ── Optional semantic similarity (sentence-transformers + numpy) ──────────────
+# If not installed → falls back to base feature scoring seamlessly.
+# Install: pip install sentence-transformers numpy
+SEMANTIC_AVAILABLE = False
+try:
+    from sentence_transformers import SentenceTransformer
+    import numpy as np
+    SEMANTIC_AVAILABLE = True
+except ImportError:
+    pass
+
+# Job description text used to compute JD embedding for semantic similarity.
+# Captures the core requirements without stuffing — so the model learns meaning,
+# not keywords (those are already handled by career_content_score).
+JD_TEXT = (
+    "Senior AI Engineer for Search and Recommendations at a product company. "
+    "Build and deploy ranking systems, retrieval pipelines, and recommendation engines at scale. "
+    "Expert in semantic search, vector databases (FAISS, Qdrant, Weaviate, Pinecone), "
+    "BM25, hybrid search, dense retrieval, learning to rank, cross-encoders, bi-encoders. "
+    "Deep understanding of NDCG, MRR, MAP, offline and online evaluation, A/B testing. "
+    "Experience fine-tuning LLMs, RAG pipelines, sentence transformers, embeddings. "
+    "Shipped ML systems to production serving real users at scale. "
+    "Strong NLP background, natural language processing, information retrieval. "
+    "Product company experience required — not consulting or outsourcing firms."
+)
+
+# Semantic component weight — applied only to top-1000 candidates in second pass.
+# We steal proportionally from other components so total stays ~1.0.
+SEMANTIC_WEIGHT = 0.10
 
 # ============================================================================
 # JD-Derived Constants
@@ -670,13 +700,16 @@ def score_candidate(candidate: Dict) -> Tuple[float, Dict]:
     combined_exp = 0.35 * exp_score + 0.65 * ai_exp_score
 
     # Weighted base score
+    # Weights reduced by ~10% total to leave room for semantic component (added in main()).
+    # If semantic unavailable, these stay as-is and sum to ~0.90 — still well-calibrated
+    # since assessment_bonus and edu_bonus add ~0.02-0.03 on top anyway.
     base = (
-        0.22 * title_score +
-        0.25 * combined_exp +
-        0.20 * skills_score +
-        0.22 * career_score +
-        0.08 * traj_score +
-        0.03 * loc_score
+        0.20 * title_score +
+        0.23 * combined_exp +
+        0.18 * skills_score +
+        0.20 * career_score +
+        0.07 * traj_score +
+        0.02 * loc_score
     )
 
     # Assessment bonus (platform-verified, small but signal)
@@ -773,6 +806,68 @@ def generate_reasoning(candidate: Dict, breakdown: Dict, rank: int) -> str:
 
 
 # ============================================================================
+# Semantic Similarity (optional second-pass enhancement)
+# ============================================================================
+
+def get_candidate_text(candidate: Dict) -> str:
+    """
+    Build a short text representation of a candidate for semantic embedding.
+    Focuses on current title + recent career descriptions + top skills.
+    Truncated to ~512 tokens worth of content.
+    """
+    profile = candidate['profile']
+    career = candidate.get('career_history', [])
+    skills = candidate.get('skills', [])
+
+    title = profile.get('current_title', '')
+
+    # Most recent 3 role descriptions
+    sorted_career = sorted(career, key=lambda r: r.get('start_date', ''), reverse=True)
+    desc_parts = []
+    for role in sorted_career[:3]:
+        t = role.get('title', '')
+        d = role.get('description', '')
+        if t or d:
+            desc_parts.append(f"{t}. {d}")
+    career_text = ' '.join(desc_parts)
+
+    # Top 8 skills by name
+    skill_names = ' '.join(s.get('name', '') for s in skills[:8])
+
+    combined = f"{title}. {career_text} Skills: {skill_names}"
+    return combined[:1500]  # Truncate — MiniLM handles up to 512 tokens anyway
+
+
+def compute_semantic_scores(
+    candidates: List[Dict],
+    model: Any,
+    jd_embedding: Any
+) -> List[float]:
+    """
+    Batch-embed all candidate texts and compute cosine similarity with JD embedding.
+    Returns a list of similarity scores in [0, 1].
+    """
+    np_module = sys.modules.get('numpy') or __import__('numpy')
+
+    texts = [get_candidate_text(c) for c in candidates]
+
+    # Batch encode — much faster than one-by-one
+    cand_embeddings = model.encode(
+        texts,
+        batch_size=128,
+        show_progress_bar=False,
+        normalize_embeddings=True,   # L2-normalize for cosine similarity via dot product
+    )
+
+    # jd_embedding is already normalized
+    similarities = cand_embeddings @ jd_embedding  # shape: (N,)
+
+    # Shift from [-1,1] to [0,1] and clip
+    scores = ((similarities + 1.0) / 2.0).clip(0.0, 1.0)
+    return scores.tolist()
+
+
+# ============================================================================
 # Entry Point
 # ============================================================================
 
@@ -797,6 +892,24 @@ def main():
         sys.exit(1)
 
     print(f"[rank.py] Loading candidates from {candidates_path} ...")
+
+    # ── Load semantic model if available ─────────────────────────────────────
+    semantic_model = None
+    jd_embedding = None
+    if SEMANTIC_AVAILABLE:
+        print("[rank.py] Loading semantic model (all-MiniLM-L6-v2) ...")
+        try:
+            semantic_model = SentenceTransformer('all-MiniLM-L6-v2')
+            jd_embedding = semantic_model.encode(
+                [JD_TEXT],
+                normalize_embeddings=True,
+                show_progress_bar=False,
+            )[0]
+            print("[rank.py] Semantic model ready.")
+        except Exception as e:
+            print(f"[rank.py] Semantic model failed to load ({e}), falling back to base scoring.")
+            semantic_model = None
+            jd_embedding = None
 
     scored: List[Tuple[float, Dict, Dict]] = []
     n = 0
@@ -829,6 +942,32 @@ def main():
 
     # Sort: score descending, tie-break candidate_id ascending (per spec)
     scored.sort(key=lambda x: (-x[0], x[1]['candidate_id']))
+
+    # ── Second pass: semantic reranking on top-1000 ───────────────────────────
+    # Only embed the top-1000 by base score — fast-path candidates (score ~0.04)
+    # can never reach top-100 even with +10% semantic boost.
+    # This keeps semantic embedding to <5s on CPU (vs ~30s for all 100K).
+    if semantic_model is not None and jd_embedding is not None:
+        print("[rank.py] Running semantic reranking on top-1000 candidates ...")
+        pool_size = min(1000, len(scored))
+        pool = scored[:pool_size]
+        pool_candidates = [c for _, c, _ in pool]
+
+        try:
+            sem_scores = compute_semantic_scores(pool_candidates, semantic_model, jd_embedding)
+            # Blend: final = base_score + SEMANTIC_WEIGHT * semantic_score
+            reranked = []
+            for i, (base_score, cand, bd) in enumerate(pool):
+                semantic_boost = SEMANTIC_WEIGHT * sem_scores[i]
+                new_score = base_score + semantic_boost
+                bd['semantic_score'] = round(sem_scores[i], 4)
+                reranked.append((new_score, cand, bd))
+            # Re-sort the pool, then stitch remaining candidates back
+            reranked.sort(key=lambda x: (-x[0], x[1]['candidate_id']))
+            scored = reranked + scored[pool_size:]
+            print(f"[rank.py] Semantic reranking complete.")
+        except Exception as e:
+            print(f"[rank.py] Semantic scoring failed ({e}), using base scores.")
 
     top_100 = scored[:100]
 
